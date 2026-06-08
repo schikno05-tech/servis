@@ -1,0 +1,4 @@
+fastapi
+uvicorn[standard]
+openpyxl
+psycopg2-binary

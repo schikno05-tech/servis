@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход — Расчёт смены</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#10151c;color:#e9eff5;font-family:'Segoe UI',system-ui,sans-serif}
+  .box{background:#1a212c;border:1px solid #2d3a4a;border-radius:16px;padding:32px;width:90%;max-width:360px}
+  h1{font-size:1.2rem;margin:0 0 6px}
+  p{color:#8a99ab;font-size:.9rem;margin:0 0 20px}
+  label{display:block;font-size:.8rem;color:#8a99ab;margin-bottom:6px}
+  input{width:100%;box-sizing:border-box;background:#222c3a;border:1px solid #2d3a4a;color:#e9eff5;
+    border-radius:10px;padding:13px;font-size:1rem;margin-bottom:16px}
+  button{width:100%;background:#3ea6ff;color:#04121f;border:none;border-radius:10px;
+    padding:14px;font-size:1rem;font-weight:700;cursor:pointer}
+  .err{color:#f87272;font-size:.85rem;margin-top:10px;min-height:18px}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>⚙️ Расчёт смены</h1>
+  <p>Введите пароль для входа</p>
+  <label>Пароль</label>
+  <input type="password" id="pass" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+  <button onclick="doLogin()">Войти</button>
+  <div class="err" id="err"></div>
+</div>
+<script>
+async function doLogin(){
+  const p=document.getElementById('pass').value;
+  const err=document.getElementById('err'); err.textContent='';
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({password:p})});
+    if(r.ok){ location.href='/'; }
+    else { err.textContent='Неверный пароль'; }
+  }catch(e){ err.textContent='Ошибка соединения'; }
+}
+</script>
+</body>
+</html>
