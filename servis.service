@@ -1,0 +1,16 @@
+[Unit]
+Description=Servis raschet smeny
+After=network.target postgresql.service
+
+[Service]
+WorkingDirectory=/root/servis
+Environment="DATABASE_URL=postgresql://servis_user:BazaBelki2026@localhost/servis"
+Environment="PASS_BRIGADE=Smena2026"
+Environment="PASS_ADMIN=Admin2026"
+Environment="SPREADSHEET_KEY=1mzPh12X2MCdaWL-pXMTxVAHZWVtpKus0D1UnOCG_lMc"
+Environment="VITRINA_GID=879590353"
+ExecStart=/root/servis/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
