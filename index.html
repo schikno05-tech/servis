@@ -408,7 +408,7 @@ async function loadWorkers(){
   $('#w-list').innerHTML=ws.map(w=>{
     const sh=SHIFTS.find(s=>s.id===w.shift_id);
     return `<tr><td>${w.name}</td><td>${fmt(w.rate)} ₽/ч</td><td>${sh?sh.name:''}</td>
-      <td class="num"><button class="ghost" onclick="delWorker(${w.id})" style="padding:6px 12px;color:var(--bad)">Убрать</button></td></tr>`;
+      <td class="num"><button class="ghost" onclick="editRate(${w.id},'${w.name.replace(/'/g,"\\'")}',${w.rate})" style="padding:6px 12px;margin-right:6px">Изменить</button><button class="ghost" onclick="delWorker(${w.id})" style="padding:6px 12px;color:var(--bad)">Убрать</button></td></tr>`;
   }).join('')||'<tr><td colspan=4 class="hint">Пока нет работников. Добавьте выше.</td></tr>';
 }
 async function addWorker(){
@@ -417,6 +417,14 @@ async function addWorker(){
   $('#w-name').value='';$('#w-rate').value=0; loadWorkers(); toast('Добавлен: '+name);
 }
 async function delWorker(id){ await api('/workers/'+id,'DELETE'); loadWorkers(); }
+async function editRate(id,name,cur){
+  const v=prompt('Новая ставка ₽/ч для «'+name+'».\n\nВнимание: новая ставка применится только к БУДУЩИМ сменам. Прошлые смены останутся посчитанными по старой ставке.', cur);
+  if(v===null) return;
+  const rate=parseFloat(String(v).replace(',','.'));
+  if(isNaN(rate)||rate<0){ toast('Неверная ставка'); return; }
+  await api('/workers/'+id+'/rate','PATCH',{rate});
+  loadWorkers(); toast('Ставка изменена: '+name+' → '+rate+' ₽/ч');
+}
 
 let ROLE=null;
 async function doLogout(){ await api('/logout','POST'); location.href='/login'; }
