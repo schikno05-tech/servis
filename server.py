@@ -20,6 +20,15 @@ PASS_BRIGADE = os.environ.get("PASS_BRIGADE", "smena2026")
 PASS_ADMIN   = os.environ.get("PASS_ADMIN", "admin2026")
 SESSIONS = {}
 
+def _migrate_attendance_rate():
+    """Добавляет колонку rate в attendance, если её ещё нет (для старых баз).
+    Отдельной транзакцией, чтобы ошибка 'колонка уже есть' не ломала инициализацию."""
+    try:
+        with get_conn() as c:
+            c.execute("ALTER TABLE attendance ADD COLUMN rate REAL")
+    except Exception:
+        pass  # колонка уже есть — это нормально
+
 def init_db():
     with get_conn() as c:
         c.execute(f"CREATE TABLE IF NOT EXISTS shift(id {pk()}, name TEXT NOT NULL)")
@@ -34,6 +43,7 @@ def init_db():
         c.execute(f"""CREATE TABLE IF NOT EXISTS attendance(
             id {pk()}, workday_id INTEGER REFERENCES workday(id) ON DELETE CASCADE,
             worker_id INTEGER REFERENCES worker(id), start_ts TEXT, end_ts TEXT,
+            rate REAL,
             UNIQUE(workday_id, worker_id))""")
         c.execute(f"""CREATE TABLE IF NOT EXISTS production(
             id {pk()}, workday_id INTEGER REFERENCES workday(id) ON DELETE CASCADE,
@@ -41,6 +51,7 @@ def init_db():
         if not c.execute("SELECT 1 FROM shift").fetchone():
             c.execute("INSERT INTO shift(name) VALUES('Смена 1')")
             c.execute("INSERT INTO shift(name) VALUES('Смена 2')")
+    _migrate_attendance_rate()
 init_db()
 
 def current_role(session: Optional[str] = Cookie(default=None)):
@@ -89,12 +100,14 @@ def calc(c, workday_id, now=None):
         price=r["price"] or 0; line=(r["qty"] or 0)*price; output+=line
         items.append({"article":r["article"],"qty":r["qty"],"price":price,"sum":round(line,2)})
     workers=[]; total_hours=0.0; total_base=0.0
-    for a in c.execute("""SELECT a.start_ts,a.end_ts,a.worker_id,w.name,w.rate
+    for a in c.execute("""SELECT a.start_ts,a.end_ts,a.worker_id,a.rate AS att_rate,w.name,w.rate AS worker_rate
                           FROM attendance a JOIN worker w ON w.id=a.worker_id
                           WHERE a.workday_id=?""",(workday_id,)):
-        h=worked_hours(a["start_ts"],a["end_ts"],wd["lunch_min"],now); base=h*a["rate"]
+        # ставка фиксируется в смене (att_rate). Если пусто (старые записи) — берём текущую из карточки.
+        rate = a["att_rate"] if a["att_rate"] is not None else a["worker_rate"]
+        h=worked_hours(a["start_ts"],a["end_ts"],wd["lunch_min"],now); base=h*rate
         total_hours+=h; total_base+=base
-        workers.append({"worker_id":a["worker_id"],"name":a["name"],"rate":a["rate"],
+        workers.append({"worker_id":a["worker_id"],"name":a["name"],"rate":rate,
             "start_ts":a["start_ts"],"end_ts":a["end_ts"],"hours":round(h,2),
             "on_shift":a["start_ts"] is not None and a["end_ts"] is None,"base":round(base,2)})
     bonus_fund=output-total_base
@@ -110,6 +123,8 @@ def calc(c, workday_id, now=None):
 
 class WorkerIn(BaseModel):
     name:str; rate:float; shift_id:int
+class RateIn(BaseModel):
+    rate:float
 class OpenIn(BaseModel):
     date:str; shift_id:int; lunch_min:int=0
 class AttIn(BaseModel):
@@ -142,6 +157,14 @@ def add_worker(w:WorkerIn, role=Depends(require_admin)):
 def del_worker(wid:int, role=Depends(require_admin)):
     with get_conn() as c:
         c.execute("UPDATE worker SET active=0 WHERE id=?",(wid,)); return {"ok":True}
+
+@app.patch("/api/workers/{wid}/rate")
+def change_worker_rate(wid:int, body:RateIn, role=Depends(require_admin)):
+    """Меняет ставку работника. Действует только ВПЕРЁД: прошлые смены хранят
+    свою зафиксированную ставку в attendance и не пересчитываются."""
+    with get_conn() as c:
+        c.execute("UPDATE worker SET rate=? WHERE id=?",(body.rate,wid))
+        return {"ok":True}
 
 @app.post("/api/refresh-prices")
 def refresh_prices(role=Depends(require_login)):
@@ -188,29 +211,35 @@ def open_day(o:OpenIn, role=Depends(require_login)):
         else:
             c.execute("INSERT OR IGNORE INTO workday(date,shift_id,lunch_min) VALUES(?,?,?)",(o.date,o.shift_id,o.lunch_min))
         wid=c.execute("SELECT id FROM workday WHERE date=? AND shift_id=?",(o.date,o.shift_id)).fetchone()["id"]
-        for w in c.execute("SELECT id FROM worker WHERE shift_id=? AND active=1",(o.shift_id,)).fetchall():
+        for w in c.execute("SELECT id, rate FROM worker WHERE shift_id=? AND active=1",(o.shift_id,)).fetchall():
             if IS_PG:
-                c.execute("INSERT INTO attendance(workday_id,worker_id) VALUES(?,?) ON CONFLICT(workday_id,worker_id) DO NOTHING",(wid,w["id"]))
+                c.execute("INSERT INTO attendance(workday_id,worker_id,rate) VALUES(?,?,?) ON CONFLICT(workday_id,worker_id) DO NOTHING",(wid,w["id"],w["rate"]))
             else:
-                c.execute("INSERT OR IGNORE INTO attendance(workday_id,worker_id) VALUES(?,?)",(wid,w["id"]))
+                c.execute("INSERT OR IGNORE INTO attendance(workday_id,worker_id,rate) VALUES(?,?,?)",(wid,w["id"],w["rate"]))
         if o.lunch_min: c.execute("UPDATE workday SET lunch_min=? WHERE id=?",(o.lunch_min,wid))
         return {"workday_id":wid}
 
 @app.post("/api/workday/{wid}/attendance")
 def set_att(wid:int, a:AttIn, role=Depends(require_login)):
     with get_conn() as c:
-        c.execute("""INSERT INTO attendance(workday_id,worker_id,start_ts,end_ts) VALUES(?,?,?,?)
-                     ON CONFLICT(workday_id,worker_id) DO UPDATE SET start_ts=excluded.start_ts,end_ts=excluded.end_ts""",
-                  (wid,a.worker_id,a.start_ts,a.end_ts))
+        wr=c.execute("SELECT rate FROM worker WHERE id=?",(a.worker_id,)).fetchone()
+        rt=wr["rate"] if wr else 0
+        # ставка фиксируется при первом попадании в смену; если уже зафиксирована — не трогаем
+        c.execute("""INSERT INTO attendance(workday_id,worker_id,start_ts,end_ts,rate) VALUES(?,?,?,?,?)
+                     ON CONFLICT(workday_id,worker_id) DO UPDATE SET start_ts=excluded.start_ts,end_ts=excluded.end_ts,
+                     rate=COALESCE(attendance.rate, excluded.rate)""",
+                  (wid,a.worker_id,a.start_ts,a.end_ts,rt))
         return {"ok":True}
 
 @app.post("/api/workday/{wid}/add-worker/{worker_id}")
 def add_worker_to_day(wid:int, worker_id:int, role=Depends(require_login)):
     with get_conn() as c:
+        wr=c.execute("SELECT rate FROM worker WHERE id=?",(worker_id,)).fetchone()
+        rt=wr["rate"] if wr else 0
         if IS_PG:
-            c.execute("INSERT INTO attendance(workday_id,worker_id) VALUES(?,?) ON CONFLICT(workday_id,worker_id) DO NOTHING",(wid,worker_id))
+            c.execute("INSERT INTO attendance(workday_id,worker_id,rate) VALUES(?,?,?) ON CONFLICT(workday_id,worker_id) DO NOTHING",(wid,worker_id,rt))
         else:
-            c.execute("INSERT OR IGNORE INTO attendance(workday_id,worker_id) VALUES(?,?)",(wid,worker_id))
+            c.execute("INSERT OR IGNORE INTO attendance(workday_id,worker_id,rate) VALUES(?,?,?)",(wid,worker_id,rt))
         return {"ok":True}
 
 @app.post("/api/workday/{wid}/production")
